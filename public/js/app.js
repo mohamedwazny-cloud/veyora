@@ -1,8 +1,8 @@
 /**
  * Veyroa Tech & Digital Solutions - POS & Online Catalog
  * Features: Mobile Accessories Cartoon Icons, Custom Categories,
- * Firebase Email & Password Authentication + Cloud Security Rules,
- * Automatic Firebase Firestore Cloud Sync (Project: veyora-98f00),
+ * Robust Firebase Firestore Cloud Sync (Project: veyora-98f00),
+ * Firebase Email & Password Authentication + Security Rules,
  * WhatsApp Direct Orders (+94 77 072 1167), Device Image Uploads.
  */
 
@@ -92,7 +92,7 @@ function renderCategoryPills() {
   categories.forEach(cat => {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = `filter-pill ${currentCategory === cat ? 'active' : ''}`;
+    btn.className = `filter-pill ${currentCategory.trim().toLowerCase() === cat.trim().toLowerCase() ? 'active' : ''}`;
     btn.onclick = () => setCategory(cat);
 
     let iconClass = 'fa-tag text-[#00b894]';
@@ -120,7 +120,7 @@ function populateCategoryDropdown(selectedCategory = '') {
     const opt = document.createElement('option');
     opt.value = cat;
     opt.textContent = cat;
-    if (selectedCategory && selectedCategory === cat) {
+    if (selectedCategory && selectedCategory.trim().toLowerCase() === cat.trim().toLowerCase()) {
       opt.selected = true;
     }
     selectEl.appendChild(opt);
@@ -133,7 +133,6 @@ function populateCategoryDropdown(selectedCategory = '') {
   selectEl.appendChild(customOpt);
 
   if (selectedCategory && !categories.includes(selectedCategory)) {
-    // If selectedCategory is a custom category
     const customExistingOpt = document.createElement('option');
     customExistingOpt.value = selectedCategory;
     customExistingOpt.textContent = selectedCategory;
@@ -186,17 +185,38 @@ function initData() {
 }
 
 function normalizeProduct(docId, data) {
+  if (!data) return null;
   return {
     id: docId || data.id || ('prod-' + Date.now()),
-    name: data.name || data.title || 'Untitled Product',
-    category: data.category || 'Mobile Accessories',
-    price: parseFloat(data.price || data.cost || 0),
-    stock: parseInt(data.stock || data.quantity || 10),
-    description: data.description || data.desc || data.details || '',
-    image: data.image || data.imageUrl || data.photo || '',
-    icon: data.icon || 'fa-mobile-screen-button',
-    bgGradient: data.bgGradient || 'from-[#1b1e58] to-[#00b894]'
+    name: (data.name || data.title || data.productName || 'Untitled Product').toString(),
+    category: (data.category || data.cat || 'Mobile Accessories').toString().trim(),
+    price: parseFloat(data.price || data.cost || data.amount || 0),
+    stock: parseInt(data.stock || data.quantity || data.qty || 0),
+    description: (data.description || data.desc || data.details || '').toString(),
+    image: (data.image || data.imageUrl || data.photo || data.img || '').toString(),
+    icon: (data.icon || 'fa-mobile-screen-button').toString(),
+    bgGradient: (data.bgGradient || 'from-[#1b1e58] to-[#00b894]').toString()
   };
+}
+
+function processFirestoreSnapshot(snapshot) {
+  if (!snapshot || snapshot.empty) return false;
+
+  const cloudProducts = [];
+  snapshot.forEach(doc => {
+    const normalized = normalizeProduct(doc.id, doc.data());
+    if (normalized) cloudProducts.push(normalized);
+  });
+
+  if (cloudProducts.length > 0) {
+    products = cloudProducts;
+    saveProductsToStorage();
+    renderCategoryPills();
+    renderProducts();
+    console.log(`⚡ Firestore Live Sync: Loaded ${cloudProducts.length} products!`, cloudProducts);
+    return true;
+  }
+  return false;
 }
 
 function initFirebaseFirestore() {
@@ -214,6 +234,11 @@ function initFirebaseFirestore() {
         db = firebase.firestore();
         console.log('🔥 Connected to Firebase Firestore for project: veyora-98f00');
 
+        // Enable Firestore Offline Persistence safely
+        db.enablePersistence({ synchronizeTabs: true }).catch(err => {
+          console.warn('Firestore Persistence Note:', err.code);
+        });
+
         // Set up Firebase Auth State Listener
         if (firebase.auth) {
           firebase.auth().onAuthStateChanged(user => {
@@ -230,26 +255,28 @@ function initFirebaseFirestore() {
           });
         }
 
+        // Direct Initial Fetch for Immediate Load (both 'products' and 'Products')
+        db.collection('products').get().then(snapshot => {
+          if (!processFirestoreSnapshot(snapshot)) {
+            db.collection('Products').get().then(snap2 => {
+              processFirestoreSnapshot(snap2);
+            }).catch(() => {});
+          }
+        }).catch(err => {
+          console.warn('Firestore initial fetch error:', err.message);
+        });
+
         // Real-time Cloud Listener across all devices
         db.collection('products').onSnapshot(snapshot => {
-          if (!snapshot.empty) {
-            const cloudProducts = [];
-            snapshot.forEach(doc => {
-              const data = doc.data();
-              const normalized = normalizeProduct(doc.id, data);
-              cloudProducts.push(normalized);
-            });
-            products = cloudProducts;
-            saveProductsToStorage();
-            renderCategoryPills();
-            renderProducts();
-            console.log(`⚡ Firestore Live Sync: ${cloudProducts.length} products loaded from cloud!`);
-          } else {
-            console.log('🌱 Firestore empty.');
-          }
+          processFirestoreSnapshot(snapshot);
         }, err => {
           console.warn('Firestore Snapshot Error:', err.message);
         });
+
+        // Secondary Real-time Listener for capital 'Products' fallback
+        db.collection('Products').onSnapshot(snapshot => {
+          processFirestoreSnapshot(snapshot);
+        }, () => {});
       }
     }
   } catch (e) {
@@ -390,6 +417,7 @@ function updateAdminUI() {
   const resetBtn = document.getElementById('resetCatalogBtn');
   const historyNavBtn = document.getElementById('navBtnHistory');
   const addProductBtn = document.getElementById('addProductBtn');
+  const emptyStateAddBtn = document.getElementById('emptyStateAddBtn');
 
   if (adminBtnText) {
     adminBtnText.textContent = isAdminLoggedIn ? 'Admin (Logged In)' : 'Admin Lock';
@@ -412,6 +440,9 @@ function updateAdminUI() {
   if (addProductBtn) {
     addProductBtn.classList.toggle('hidden', !isAdminLoggedIn);
   }
+  if (emptyStateAddBtn) {
+    emptyStateAddBtn.classList.toggle('hidden', !isAdminLoggedIn);
+  }
 
   renderCategoryPills();
   renderProducts();
@@ -428,11 +459,11 @@ function renderProducts() {
   const filtered = products.filter(p => {
     const pName = (p.name || p.title || 'Untitled Product').toString().toLowerCase();
     const pDesc = (p.description || p.desc || p.details || '').toString().toLowerCase();
-    const pCat = (p.category || 'Mobile Accessories').toString();
-    const sQuery = searchQuery.toLowerCase();
+    const pCat = (p.category || 'Mobile Accessories').toString().trim().toLowerCase();
+    const sQuery = searchQuery.toLowerCase().trim();
 
-    const matchesCat = (currentCategory === 'All') || (pCat === currentCategory);
-    const matchesSearch = pName.includes(sQuery) || pDesc.includes(sQuery) || pCat.toLowerCase().includes(sQuery);
+    const matchesCat = (currentCategory === 'All') || (pCat === currentCategory.trim().toLowerCase());
+    const matchesSearch = sQuery === '' || pName.includes(sQuery) || pDesc.includes(sQuery) || pCat.includes(sQuery);
     return matchesCat && matchesSearch;
   });
 
@@ -811,13 +842,7 @@ window.sendWhatsAppOrder = function(customItems = null) {
 // Category Filter Handling
 window.setCategory = function(cat) {
   currentCategory = cat;
-  document.querySelectorAll('.filter-pill').forEach(pill => {
-    if (pill.dataset.category === cat) {
-      pill.classList.add('active');
-    } else {
-      pill.classList.remove('active');
-    }
-  });
+  renderCategoryPills();
   renderProducts();
 };
 
@@ -827,28 +852,52 @@ window.handleSearch = function(query) {
   renderProducts();
 };
 
-// Add / Edit Product Modal Handlers & File Upload
+// Add / Edit Product Modal Handlers & File Upload with Canvas Optimization
 window.handleImageFileUpload = function(event) {
   const file = event.target.files[0];
   if (!file) return;
 
-  if (file.size > 5 * 1024 * 1024) {
-    showToast('Image size is too large! Please choose an image under 5MB.', 'warning');
-    return;
-  }
+  showToast('Optimizing image...', 'info');
 
   const reader = new FileReader();
   reader.onload = function(e) {
-    const base64Data = e.target.result;
-    document.getElementById('prodImageInput').value = base64Data;
+    const img = new Image();
+    img.onload = function() {
+      // Compress and resize image (max 600px) for fast Firestore cloud sync
+      const canvas = document.createElement('canvas');
+      const maxDim = 600;
+      let width = img.width;
+      let height = img.height;
 
-    const previewContainer = document.getElementById('imagePreviewContainer');
-    const previewThumb = document.getElementById('imagePreviewThumb');
-    if (previewContainer && previewThumb) {
-      previewThumb.src = base64Data;
-      previewContainer.classList.remove('hidden');
-    }
-    showToast('Image uploaded from device successfully!', 'success');
+      if (width > height) {
+        if (width > maxDim) {
+          height = Math.round((height * maxDim) / width);
+          width = maxDim;
+        }
+      } else {
+        if (height > maxDim) {
+          width = Math.round((width * maxDim) / height);
+          height = maxDim;
+        }
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+
+      const compressedBase64 = canvas.toDataURL('image/jpeg', 0.8);
+      document.getElementById('prodImageInput').value = compressedBase64;
+
+      const previewContainer = document.getElementById('imagePreviewContainer');
+      const previewThumb = document.getElementById('imagePreviewThumb');
+      if (previewContainer && previewThumb) {
+        previewThumb.src = compressedBase64;
+        previewContainer.classList.remove('hidden');
+      }
+      showToast('Image optimized & ready for cloud sync!', 'success');
+    };
+    img.src = e.target.result;
   };
   reader.readAsDataURL(file);
 };
